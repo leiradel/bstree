@@ -2,9 +2,11 @@
 
 **bstree** is Lua source code obfuscator. It analyzes Lua files in source code and outputs an encoder and a decoder.
 
+BS stands for Bit Stream or Bull Shit, depending on your mood.
+
 ## Usage
 
-    $ lua bstree.lua &lt;input.lua>+
+    $ lua bstree.lua <input.lua>+
 
 This command will analyze all given Lua files and output two files:
 
@@ -13,9 +15,9 @@ This command will analyze all given Lua files and output two files:
 
 ## bsenc.lua
 
-    $ lua bsenc.lua &lt;input.lua> &lt;output.lua>
+    $ lua bsenc.lua <input.lua> <output.bs>
 
-Obfuscates the given Lua file in source code format, producing &lt;output.lua>. Use &lt;output.lua> in your applications.
+Obfuscates the given Lua file in source code format, producing `output.bs`. Use `output.bs` in your applications.
 
 ## bsreader.c
 
