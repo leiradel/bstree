@@ -646,9 +646,9 @@ local function writedec( dectab, map, root )
   
   file:write( '};\n\n' )
   
-  file:write( '#define ROOT    ( &', root, ' )\n' )
-  file:write( '#define LITERAL ', map.literal, '\n' )
-  file:write( '#define EOF     ', map.eof, '\n\n' )
+  file:write( '#define BS_ROOT    ( &', root, ' )\n' )
+  file:write( '#define BS_LITERAL ', map.literal, '\n' )
+  file:write( '#define BS_EOF     ', map.eof, '\n\n' )
   
   file:write( '#endif /* BSTREE_H */\n' )
   file:close()
