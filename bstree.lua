@@ -538,25 +538,29 @@ end
 local function encode( source )
   local encoded = {}
   
-  for token, lexeme in lexer.lua( source ) do
+  for token, lexeme in lexer.lua( source, {} ) do
     local bits
     
-    if token == 'keyword' then
-      bits = enctab[ lexeme ]
-    elseif token == 'iden' or token == 'number' or token == 'string' then
-      bits = enctab.literal
-    else
-      bits = enctab[ token ]
-    end
-    
-    addbits( encoded, bits )
-    
-    if token == 'iden' then
+    if token == 'space' then
+      for i = 1, #lexeme do
+        addbits( encoded, enctab[ lexeme:sub( i, i ) ] )
+      end
+    elseif token == 'keyword' then
+      addbits( encoded, enctab[ lexeme ] )
+    elseif token == 'iden' then
+      addbits( encoded, enctab.literal )
       addliteral( encoded, lexeme )
     elseif token == 'number' then
+      addbits( encoded, enctab.literal )
       addliteral( encoded, tostring( lexeme ) )
     elseif token == 'string' then
+      addbits( encoded, enctab.literal )
       addliteral( encoded, string.format( '%q', lexeme ) )
+    elseif token == 'comment' then
+      addbits( encoded, enctab.literal )
+      addliteral( encoded, lexeme )
+    else
+      addbits( encoded, enctab[ lexeme ] )
     end
   end
   
@@ -577,7 +581,7 @@ end
 
 local function main( args )
   if #args ~= 2 then
-    io.write( 'Usage: lua bsenc.lua <input.lua> <output.lua>\n' )
+    io.write( 'Usage: lua bsenc.lua <input.lua> <output.bs>\n' )
     return 0
   end
   
@@ -613,6 +617,147 @@ return main( arg )
 end
 
 local function writedec( dectab, map, root )
+  local file, err = io.open( 'bsdec.lua', 'w' )
+  
+  if not file then
+    errorout( '%s\n', err )
+  end
+  
+  file:write( 'local bi32 = require \'bit32\'\n\n' )
+  
+  file:write( table.concat( dectab ) )
+  
+  file:write( '\n' )
+  file:write( 'local BS_ROOT = ', root, '\n\n' )
+  
+  file:write[===[
+local function newreader( bytes )
+  return {
+    bytes = bytes,
+    pos = 1,
+    bit = 128,
+    getbit = function( self )
+      local bit = bit32.band( string.byte( self.bytes, self.pos ), self.bit )
+      
+      self.bit = bit32.rshift( self.bit, 1 )
+      
+      if self.bit == 0 then
+        self.pos = self.pos + 1
+        self.bit = 128
+      end
+      
+      return bit == 0 and 0 or 1
+    end,
+    getbyte = function( self )
+      local byte = 0
+      
+      for i = 1, 8 do
+        byte = byte * 2 + self:getbit()
+      end
+      
+      return byte
+    end,
+    getliteral = function( self )
+      local literal = {}
+      
+      if self.bit == 128 then
+        self.bit = 64
+      end
+      
+      while true do
+        local byte = self:getbyte()
+        
+        if byte == 0 then
+          break
+        else
+          literal[ #literal + 1 ] = string.char( byte )
+        end
+      end
+      
+      return table.concat( literal )
+    end
+  }
+end
+
+local function bsread( reader )
+  local node = BS_ROOT
+  
+  while type( node ) == 'table' do
+    if reader:getbit() == 0 then
+      node = node.left
+    else
+      node = node.right
+    end
+  end
+  
+  if node == 'literal' then
+    return reader:getliteral()
+  elseif node ~= 'eof' then
+    return node
+  else
+    return nil
+  end
+end
+
+local function main( args )
+  if #args ~= 2 then
+    io.write( 'Usage: lua bsdec.lua <input.bs> <output.lua>\n' )
+    return 0
+  end
+  
+  local file, err = io.open( args[ 1 ], 'rb' )
+  
+  if not file then
+    errorout( 'Error opening %s', args[ 1 ] )
+  end
+  
+  local bs = file:read( '*a' )
+  file:close()
+  
+  if not bs then
+    errorout( 'Could not read from %s', args[ 1 ] )
+  end
+  
+  local reader = newreader( bs )
+  
+  file, err = io.open( args[ 2 ], 'w' )
+  
+  if not file then
+    errorout( 'Error opening %s', args[ 2 ] )
+  end
+  
+  while true do
+    local source = bsread( reader )
+    
+    if source then
+      file:write( source )
+    else
+      break
+    end
+  end
+  
+  file:close()
+end
+
+return main( arg )
+]===]
+  
+  file:close()
+end
+
+local function str( x )
+  if #x == 1 and string.byte( x, 1, 1 ) < 32 then
+    x = string.byte( x, 1, 1 )
+    local digits = '0123456789abcdef'
+    local i = math.floor( x / 16 ) + 1
+    local j = x % 16 + 1
+    return '\\x' .. digits:sub( i, i ) .. digits:sub( j, j )
+  else
+    return x
+  end
+end
+
+local function writetree( dectab, map, root )
   local file, err = io.open( 'bstree.h', 'w' )
   
   if not file then
@@ -622,12 +767,12 @@ local function writedec( dectab, map, root )
   file:write( '#ifndef BSTREE_H\n' )
   file:write( '#define BSTREE_H\n\n' )
   
-  file:write( 'typedef struct node_t node_t;\n\n' )
-  file:write( 'struct node_t\n' )
+  file:write( 'typedef struct bsnode_t bsnode_t;\n\n' )
+  file:write( 'struct bsnode_t\n' )
   file:write( '{\n' )
-  file:write( '  const node_t* left;\n' )
-  file:write( '  const node_t* right;\n' )
-  file:write( '  char          token;\n' )
+  file:write( '  const bsnode_t* left;\n' )
+  file:write( '  const bsnode_t* right;\n' )
+  file:write( '  int             token;\n' )
   file:write( '};\n\n' )
   
   file:write( table.concat( dectab ) )
@@ -638,7 +783,7 @@ local function writedec( dectab, map, root )
   
   for _, token in ipairs( map ) do
     if token ~= 'literal' and token ~= 'eof' then
-      file:write( '  { "', token, '", ', #token, ' },\n' )
+      file:write( '  { "', str( token ), '", ', #token, ' },\n' )
     else
       file:write( '  { NULL, 0 },\n' )
     end
@@ -657,77 +802,89 @@ end
 local function buildtree( source )
   local tokens = {}
   
-  for token, lexeme in lexer.lua( source ) do
-    if token == 'keyword' then
-      tokens[ lexeme ] = ( tokens[ lexeme ] or 0 ) + 1
+  tokens[ 'and' ] = 0
+  tokens[ 'break' ] = 0
+  tokens[ 'do' ] = 0
+  tokens[ 'else' ] = 0
+  tokens[ 'elseif' ] = 0
+  tokens[ 'end' ] = 0
+  tokens[ 'false' ] = 0
+  tokens[ 'for' ] = 0
+  tokens[ 'function' ] = 0
+  tokens[ 'goto' ] = 0
+  tokens[ 'if' ] = 0
+  tokens[ 'in' ] = 0
+  tokens[ 'local' ] = 0
+  tokens[ 'nil' ] = 0
+  tokens[ 'not' ] = 0
+  tokens[ 'or' ] = 0
+  tokens[ 'repeat' ] = 0
+  tokens[ 'return' ] = 0
+  tokens[ 'then' ] = 0
+  tokens[ 'true' ] = 0
+  tokens[ 'until' ] = 0
+  tokens[ 'while' ] = 0
+  tokens[ '+' ] = 0
+  tokens[ '-' ] = 0
+  tokens[ '*' ] = 0
+  tokens[ '/' ] = 0
+  tokens[ '%' ] = 0
+  tokens[ '^' ] = 0
+  tokens[ '#' ] = 0
+  tokens[ '&' ] = 0
+  tokens[ '~' ] = 0
+  tokens[ '|' ] = 0
+  tokens[ '<<' ] = 0
+  tokens[ '>>' ] = 0
+  tokens[ '//' ] = 0
+  tokens[ '==' ] = 0
+  tokens[ '~=' ] = 0
+  tokens[ '<=' ] = 0
+  tokens[ '>=' ] = 0
+  tokens[ '<' ] = 0
+  tokens[ '>' ] = 0
+  tokens[ '=' ] = 0
+  tokens[ '(' ] = 0
+  tokens[ ')' ] = 0
+  tokens[ '{' ] = 0
+  tokens[ '}' ] = 0
+  tokens[ '[' ] = 0
+  tokens[ ']' ] = 0
+  tokens[ '::' ] = 0
+  tokens[ ';' ] = 0
+  tokens[ ':' ] = 0
+  tokens[ ',' ] = 0
+  tokens[ '.' ] = 0
+  tokens[ '..' ] = 0
+  tokens[ '...' ] = 0
+  
+  tokens[ string.char( 9 ) ] = 0
+  tokens[ string.char( 10 ) ] = 0
+  tokens[ string.char( 11 ) ] = 0
+  tokens[ string.char( 12 ) ] = 0
+  tokens[ string.char( 13 ) ] = 0
+  tokens[ string.char( 32 ) ] = 0
+  
+  tokens.literal = 0
+  tokens.self = 0
+  tokens.eof = 0
+  
+  for token, lexeme in lexer.lua( source, { comments = true } ) do
+    if token == 'space' then
+      for i = 1, #lexeme do
+        local char = lexeme:sub( i, i )
+        tokens[ char ] = tokens[ char ] + 1
+      end
+    elseif token == 'keyword' then
+      tokens[ lexeme ] = tokens[ lexeme ] + 1
     elseif token == 'iden' and lexeme == 'self' then
-      tokens.self = ( tokens.self or 0 ) + 1
+      tokens.self = tokens.self + 1
     elseif token == 'iden' or token == 'number' or token == 'string' then
-      tokens.literal = ( tokens.literal or 0 ) + 1
+      tokens.literal = tokens.literal + 1
     else
-      tokens[ token ] = ( tokens[ token ] or 0 ) + 1
+      tokens[ token ] = tokens[ token ] + 1
     end
   end
-  
-  tokens[ 'and' ] = tokens[ 'and' ] or 0
-  tokens[ 'break' ] = tokens[ 'break' ] or 0
-  tokens[ 'do' ] = tokens[ 'do' ] or 0
-  tokens[ 'else' ] = tokens[ 'else' ] or 0
-  tokens[ 'elseif' ] = tokens[ 'elseif' ] or 0
-  tokens[ 'end' ] = tokens[ 'end' ] or 0
-  tokens[ 'false' ] = tokens[ 'false' ] or 0
-  tokens[ 'for' ] = tokens[ 'for' ] or 0
-  tokens[ 'function' ] = tokens[ 'function' ] or 0
-  tokens[ 'goto' ] = tokens[ 'goto' ] or 0
-  tokens[ 'if' ] = tokens[ 'if' ] or 0
-  tokens[ 'in' ] = tokens[ 'in' ] or 0
-  tokens[ 'local' ] = tokens[ 'local' ] or 0
-  tokens[ 'nil' ] = tokens[ 'nil' ] or 0
-  tokens[ 'not' ] = tokens[ 'not' ] or 0
-  tokens[ 'or' ] = tokens[ 'or' ] or 0
-  tokens[ 'repeat' ] = tokens[ 'repeat' ] or 0
-  tokens[ 'return' ] = tokens[ 'return' ] or 0
-  tokens[ 'then' ] = tokens[ 'then' ] or 0
-  tokens[ 'true' ] = tokens[ 'true' ] or 0
-  tokens[ 'until' ] = tokens[ 'until' ] or 0
-  tokens[ 'while' ] = tokens[ 'while' ] or 0
-  tokens[ '+' ] = tokens[ '+' ] or 0
-  tokens[ '-' ] = tokens[ '-' ] or 0
-  tokens[ '*' ] = tokens[ '*' ] or 0
-  tokens[ '/' ] = tokens[ '/' ] or 0
-  tokens[ '%' ] = tokens[ '%' ] or 0
-  tokens[ '^' ] = tokens[ '^' ] or 0
-  tokens[ '#' ] = tokens[ '#' ] or 0
-  tokens[ '&' ] = tokens[ '&' ] or 0
-  tokens[ '~' ] = tokens[ '~' ] or 0
-  tokens[ '|' ] = tokens[ '|' ] or 0
-  tokens[ '<<' ] = tokens[ '<<' ] or 0
-  tokens[ '>>' ] = tokens[ '>>' ] or 0
-  tokens[ '//' ] = tokens[ '//' ] or 0
-  tokens[ '==' ] = tokens[ '==' ] or 0
-  tokens[ '~=' ] = tokens[ '~=' ] or 0
-  tokens[ '<=' ] = tokens[ '<=' ] or 0
-  tokens[ '>=' ] = tokens[ '>=' ] or 0
-  tokens[ '<' ] = tokens[ '<' ] or 0
-  tokens[ '>' ] = tokens[ '>' ] or 0
-  tokens[ '=' ] = tokens[ '=' ] or 0
-  tokens[ '(' ] = tokens[ '(' ] or 0
-  tokens[ ')' ] = tokens[ ')' ] or 0
-  tokens[ '{' ] = tokens[ '{' ] or 0
-  tokens[ '}' ] = tokens[ '}' ] or 0
-  tokens[ '[' ] = tokens[ '[' ] or 0
-  tokens[ ']' ] = tokens[ ']' ] or 0
-  tokens[ '::' ] = tokens[ '::' ] or 0
-  tokens[ ';' ] = tokens[ ';' ] or 0
-  tokens[ ':' ] = tokens[ ':' ] or 0
-  tokens[ ',' ] = tokens[ ',' ] or 0
-  tokens[ '.' ] = tokens[ '.' ] or 0
-  tokens[ '..' ] = tokens[ '..' ] or 0
-  tokens[ '...' ] = tokens[ '...' ] or 0
-  
-  tokens.literal = tokens.literal or 0
-  tokens.self = tokens.self or 0
-  tokens.eof = 0
   
   local trees = {}
   
@@ -773,7 +930,7 @@ local function buildtree( source )
       walk( tree.left, seq .. '0' )
       walk( tree.right, seq .. '1' )
     else
-      enctab[ #enctab + 1 ] = '  [ \'' .. tree.token .. '\' ] = \'' .. seq .. '\', -- ' .. tree.freq .. '\n'
+      enctab[ #enctab + 1 ] = string.format( '  [ %q ] = \'%s\', -- %s\n', tree.token, seq, tree.freq )
     end
   end
   
@@ -805,16 +962,34 @@ local function buildtree( source )
       walk2( tree.left, seq .. '0' )
       walk2( tree.right, seq .. '1' )
       
-      dectab[ #dectab + 1 ] = 'static const node_t ' .. id( tree ) .. ' = '
+      dectab[ #dectab + 1 ] = 'static const bsnode_t ' .. id( tree ) .. ' = '
       dectab[ #dectab + 1 ] = '{ &' .. id( tree.left ) .. ', &' .. id( tree.right ) .. ', -1 };\n'
     else
-      dectab[ #dectab + 1 ] = 'static const node_t ' .. id( tree ) .. ' = '
-      dectab[ #dectab + 1 ] = '{ NULL, NULL, ' .. ndx( tree.token ) .. ' }; /* "' .. tree.token .. '" ' .. seq .. ' ' .. tokens[ tree.token ] .. ' */\n'
+      dectab[ #dectab + 1 ] = 'static const bsnode_t ' .. id( tree ) .. ' = '
+      dectab[ #dectab + 1 ] = '{ NULL, NULL, ' .. ndx( tree.token ) .. ' }; /* "' .. str( tree.token ) .. '" ' .. seq .. ' ' .. tokens[ tree.token ] .. ' */\n'
+    end
+  end
+    
+  walk2( trees[ 1 ], '' )
+  writetree( dectab, map, id( trees[ 1 ] ) )
+  
+  dectab = {}
+  
+  local walk3
+  walk3 = function( tree, seq )
+    if tree.left then
+      walk3( tree.left, seq .. '0' )
+      walk3( tree.right, seq .. '1' )
+      
+      dectab[ #dectab + 1 ] = 'local ' .. id( tree ) .. ' = '
+      dectab[ #dectab + 1 ] = '{ left = ' .. id( tree.left ) .. ', right = ' .. id( tree.right ) .. ' }\n'
+    else
+      dectab[ #dectab + 1 ] = 'local ' .. id( tree ) .. ' = '
+      dectab[ #dectab + 1 ] = string.format( '%q', tree.token ) .. ' -- ' .. seq .. ' ' .. tokens[ tree.token ] .. '\n'
     end
   end
   
-  
-  walk2( trees[ 1 ], '' )
+  walk3( trees[ 1 ], '' )
   writedec( dectab, map, id( trees[ 1 ] ) )
 end
 
